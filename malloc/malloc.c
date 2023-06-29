@@ -14,17 +14,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define FREE_LIST_BIN_SIZE 11
+
 //
 // Interfaces to get memory pages from OS
 //
-
 void *mmap_from_system(size_t size);
 void munmap_to_system(void *ptr, size_t size);
 
 //
 // Struct definitions
 //
-
 typedef struct my_metadata_t {
   size_t size;
   struct my_metadata_t *next;
@@ -38,23 +38,38 @@ typedef struct my_heap_t {
 //
 // Static variables (DO NOT ADD ANOTHER STATIC VARIABLES!)
 //
-my_heap_t my_heap;
+my_heap_t my_heap[FREE_LIST_BIN_SIZE]; 
 
 //
 // Helper functions (feel free to add/remove/edit!)
 //
-
+// Add a free slot to the beginning of the free list.
 void my_add_to_free_list(my_metadata_t *metadata) {
+  // printf("%zuの新しいfreeを追加\n", metadata -> size);
   assert(!metadata->next);
-  metadata->next = my_heap.free_head;
-  my_heap.free_head = metadata;
+
+  // sizeからどのfree list binに属するか判断
+  int i, j, size, max_size;
+  size = metadata -> size;
+  for (i=1; i <= FREE_LIST_BIN_SIZE - 1; i++) {
+    for (j=1; j <= i + 1; j++) {
+      max_size *= 2;
+    }
+    if (!(size <= max_size)) {
+      break;
+    }
+  }
+  metadata->next = my_heap[i-1].free_head;
+  my_heap[i-1].free_head = metadata;
 }
 
-void my_remove_from_free_list(my_metadata_t *metadata, my_metadata_t *prev) {
+void my_remove_from_free_list(my_metadata_t *metadata, my_metadata_t *prev, int bin_group) {
+  // printf("%zuをfreeから削除\n", metadata -> size);
+
   if (prev) {
     prev->next = metadata->next;
   } else {
-    my_heap.free_head = metadata->next;
+    my_heap[bin_group].free_head = metadata->next;
   }
   metadata->next = NULL;
 }
@@ -65,9 +80,13 @@ void my_remove_from_free_list(my_metadata_t *metadata, my_metadata_t *prev) {
 
 // This is called at the beginning of each challenge.
 void my_initialize() {
-  my_heap.free_head = &my_heap.dummy;
-  my_heap.dummy.size = 0;
-  my_heap.dummy.next = NULL;
+  // printf("初期化--------------\n");
+  int i;
+  for (i=0; i <= FREE_LIST_BIN_SIZE - 1; i++) {
+    my_heap[i].free_head = &my_heap[i].dummy;
+    my_heap[i].dummy.size = 0;
+    my_heap[i].dummy.next = NULL;
+  }
 }
 
 // my_malloc() is called every time an object is allocated.
@@ -75,14 +94,48 @@ void my_initialize() {
 // 4000. You are not allowed to use any library functions other than
 // mmap_from_system() / munmap_to_system().
 void *my_malloc(size_t size) {
-  my_metadata_t *metadata = my_heap.free_head;
+  // printf("%zuのメモリーが欲しい!!!", size);
+  // sizeからどのbinに属するか判断
+  int i, j, max_size, bin_group;
+  for (i=1; i <= FREE_LIST_BIN_SIZE - 1; i++) {
+    for (j=1; j <= i + 1; j++) {
+      max_size *= 2;
+    }
+    if (!(size <= max_size)) {
+      break;
+    }
+  }
+  bin_group = i - 1;
+  my_metadata_t *metadata = my_heap[bin_group].free_head;
   my_metadata_t *prev = NULL;
   // First-fit: Find the first free slot the object fits.
   // TODO: Update this logic to Best-fit!
-  while (metadata && metadata->size < size) {
-    prev = metadata;
-    metadata = metadata->next;
+
+  my_metadata_t *current_metadata = my_heap[bin_group].free_head;
+  my_metadata_t *prev_metadata = NULL;
+  my_metadata_t *best_metadata = NULL;
+  my_metadata_t *best_prev_metadata =NULL;
+  size_t best_diff = 5000; //ここを追加するメモリ(4080)以下にしていると無限ループ
+  while (current_metadata) {
+    if (current_metadata -> size >= size) {
+      size_t diff = current_metadata -> size - size;
+      if (diff < best_diff) {
+        best_prev_metadata = prev_metadata;
+        best_metadata = current_metadata;
+        best_diff = diff;
+        if (best_diff == 0) {
+          break;
+        }
+      }
+    }
+
+    prev_metadata = current_metadata;
+    current_metadata = current_metadata->next;
   }
+
+  // printf("%zu\n", best_diff);
+  metadata = best_metadata;
+  prev = best_prev_metadata;
   // now, metadata points to the first free slot
   // and prev is the previous entry.
 
@@ -100,6 +153,7 @@ void *my_malloc(size_t size) {
     metadata->size = buffer_size - sizeof(my_metadata_t);
     metadata->next = NULL;
     // Add the memory region to the free list.
+    // printf("足りなかったのでメモリを追加--------\n");
     my_add_to_free_list(metadata);
     // Now, try my_malloc() again. This should succeed.
     return my_malloc(size);
@@ -113,7 +167,7 @@ void *my_malloc(size_t size) {
   void *ptr = metadata + 1;
   size_t remaining_size = metadata->size - size;
   // Remove the free slot from the free list.
-  my_remove_from_free_list(metadata, prev);
+  my_remove_from_free_list(metadata, prev, bin_group);
 
   if (remaining_size > sizeof(my_metadata_t)) {
     // Shrink the metadata for the allocated object
@@ -133,6 +187,7 @@ void *my_malloc(size_t size) {
     new_metadata->size = remaining_size - sizeof(my_metadata_t);
     new_metadata->next = NULL;
     // Add the remaining free slot to the free list.
+    // printf("残りの領域をfreeに追加-----\n");
     my_add_to_free_list(new_metadata);
   }
   return ptr;
@@ -141,6 +196,7 @@ void *my_malloc(size_t size) {
 // This is called every time an object is freed.  You are not allowed to
 // use any library functions other than mmap_from_system / munmap_to_system.
 void my_free(void *ptr) {
+  // printf("freeする---------\n");
   // Look up the metadata. The metadata is placed just prior to the object.
   //
   // ... | metadata | object | ...
